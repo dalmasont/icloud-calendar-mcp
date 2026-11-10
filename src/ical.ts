@@ -14,6 +14,8 @@ export type CalendarEvent = {
   timeZone?: string;
   location?: string;
   description?: string;
+  /** TRANSP: `busy` blocks time (OPAQUE, the default), `free` does not (TRANSPARENT) */
+  showAs?: "busy" | "free";
 };
 
 export type Period = {
@@ -134,6 +136,13 @@ function toCalendarEvent({
   const timeZone = timeZoneOf(startDate);
   const location = item.location ?? undefined;
   const description = item.description ?? undefined;
+  const transp = item.component.getFirstPropertyValue("transp");
+  const showAs =
+    typeof transp === "string"
+      ? transp.toUpperCase() === "TRANSPARENT"
+        ? "free"
+        : "busy"
+      : undefined;
   return {
     uid: item.uid,
     summary: item.summary ?? "",
@@ -143,6 +152,7 @@ function toCalendarEvent({
     ...(timeZone === undefined ? {} : { timeZone }),
     ...(location === undefined ? {} : { location }),
     ...(description === undefined ? {} : { description }),
+    ...(showAs === undefined ? {} : { showAs }),
   };
 }
 
