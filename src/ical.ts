@@ -346,13 +346,18 @@ function expandEvents(
     .map(toCalendarEvent);
 }
 
-export type NewEvent = Omit<CalendarEvent, "timeZone">;
+export type NewEvent = Omit<CalendarEvent, "timeZone"> & {
+  /** RRULE value, e.g. `FREQ=WEEKLY;BYDAY=FR` */
+  recurrence?: string;
+};
 
 /** Omitted fields stay as they are; `null` removes a field */
 export type EventChanges = {
   summary?: string;
   location?: string | null;
   description?: string | null;
+  /** RRULE value; `null` makes the event non-recurring */
+  recurrence?: string | null;
 } & (
   | { start: string; end: string; allDay: boolean }
   | { start?: undefined; end?: undefined; allDay?: undefined }
@@ -408,6 +413,13 @@ export function applyEventChanges(
   setText(series, "summary", changes.summary);
   setText(series, "location", changes.location);
   setText(series, "description", changes.description);
+  if (changes.recurrence === null) series.removeAllProperties("rrule");
+  else if (changes.recurrence !== undefined) {
+    series.updatePropertyWithValue(
+      "rrule",
+      ICAL.Recur.fromString(changes.recurrence),
+    );
+  }
   if (changes.start !== undefined) {
     setBoundary(series, "dtstart", changes.start, changes.allDay);
     setBoundary(series, "dtend", changes.end, changes.allDay);
@@ -471,6 +483,9 @@ export function buildEvent(event: NewEvent, now: Date): string {
     `DTSTAMP:${toUtcDateTime(now)}`,
     dateProperty("DTSTART", event.start, event.allDay),
     dateProperty("DTEND", event.end, event.allDay),
+    ...(event.recurrence === undefined
+      ? []
+      : [`RRULE:${ICAL.Recur.fromString(event.recurrence).toString()}`]),
     `SUMMARY:${escapeText(event.summary)}`,
     ...(event.location === undefined
       ? []
