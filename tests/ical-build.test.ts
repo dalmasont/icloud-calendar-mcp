@@ -92,3 +92,34 @@ describe("buildEvent", () => {
     ).toHaveLength(1);
   });
 });
+
+describe("buildEvent recurrence", () => {
+  test("writes RRULE and the series expands weekly", () => {
+    const ics = buildEvent(
+      {
+        uid: "weekly-1",
+        summary: "Revisão semanal",
+        start: "2026-11-13T15:00:00-03:00",
+        end: "2026-11-13T17:00:00-03:00",
+        allDay: false,
+        recurrence: "FREQ=WEEKLY;BYDAY=FR",
+      },
+      now,
+    );
+    expect(ics.split("\r\n")).toContain("RRULE:FREQ=WEEKLY;BYDAY=FR");
+    const events = parseEvents(
+      ics,
+      {
+        start: new Date("2026-11-01T00:00:00-03:00"),
+        end: new Date("2026-12-01T00:00:00-03:00"),
+        localOffsetSeconds: -3 * 3600,
+      },
+      new RecurrenceBudget(),
+    );
+    expect(events.map((e) => e.start.slice(0, 10))).toEqual([
+      "2026-11-13",
+      "2026-11-20",
+      "2026-11-27",
+    ]);
+  });
+});
