@@ -13,6 +13,13 @@ function json(value: unknown) {
   };
 }
 
+const recurrence = z
+  .string()
+  .regex(/^FREQ=(DAILY|WEEKLY|MONTHLY|YEARLY)(;[A-Z]+=[A-Z0-9,+\-:]+)*$/)
+  .describe(
+    'iCalendar RRULE value without "RRULE:", e.g. "FREQ=WEEKLY;BYDAY=FR" or "FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR". Add COUNT=n or UNTIL=YYYYMMDDTHHMMSSZ to end the series',
+  );
+
 export function createMcpServer(tools: CalendarTools): McpServer {
   const server = new McpServer(SERVER_INFO);
 
@@ -53,7 +60,7 @@ export function createMcpServer(tools: CalendarTools): McpServer {
     {
       title: "Create event",
       description:
-        "Create an event. Dates (YYYY-MM-DD) for `start` and `end` make an all-day event, where `end` is the day after the last day. Otherwise use ISO 8601 date-times with an offset.",
+        "Create an event. Dates (YYYY-MM-DD) for `start` and `end` make an all-day event, where `end` is the day after the last day. Otherwise use ISO 8601 date-times with an offset. `recurrence` (RRULE) makes it repeat; `start`/`end` are the first occurrence.",
       inputSchema: z.object({
         calendarUrl: z.url().describe("A `url` returned by list_calendars"),
         summary: z.string().min(1).describe("Title of the event"),
@@ -61,6 +68,7 @@ export function createMcpServer(tools: CalendarTools): McpServer {
         end: periodBoundary,
         location: z.string().optional(),
         description: z.string().optional(),
+        recurrence: recurrence.optional(),
       }),
       annotations: {
         readOnlyHint: false,
@@ -76,7 +84,7 @@ export function createMcpServer(tools: CalendarTools): McpServer {
     {
       title: "Update event",
       description:
-        "Change fields of an event by the `url` returned by list_events. Omitted fields stay as they are; `null` removes location or description. Give `start` and `end` together, in the same form as create_event. Alarms, attendees, and recurrence rules are kept. Updating a recurring event changes the whole series. Fails if the event changed elsewhere since it was read.",
+        "Change fields of an event by the `url` returned by list_events. Omitted fields stay as they are; `null` removes location or description. Give `start` and `end` together, in the same form as create_event. Alarms and attendees are kept; the recurrence rule is kept unless `recurrence` is given (null removes it). Updating a recurring event changes the whole series. Fails if the event changed elsewhere since it was read.",
       inputSchema: z.object({
         eventUrl: z.url(),
         summary: z.string().min(1).optional(),
@@ -84,6 +92,10 @@ export function createMcpServer(tools: CalendarTools): McpServer {
         end: periodBoundary.optional(),
         location: z.string().nullable().optional(),
         description: z.string().nullable().optional(),
+        recurrence: recurrence
+          .nullable()
+          .optional()
+          .describe("RRULE value; null makes the event non-recurring"),
       }),
       annotations: {
         readOnlyHint: false,
