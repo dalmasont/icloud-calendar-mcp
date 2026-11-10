@@ -36,6 +36,8 @@ export type CreateEventInput = {
   end: string;
   location?: string;
   description?: string;
+  /** RRULE value, e.g. `FREQ=WEEKLY;BYDAY=FR` */
+  recurrence?: string;
 };
 
 export type DeleteEventInput = {
@@ -51,6 +53,8 @@ export type UpdateEventInput = {
   end?: string;
   location?: string | null;
   description?: string | null;
+  /** RRULE value; `null` makes the event non-recurring */
+  recurrence?: string | null;
 };
 
 export type ListedEvent = StoredEvent & { calendar: string };
