@@ -110,3 +110,31 @@ describe("applyEventChanges", () => {
     expect(lines(ics).filter((line) => line === "END:VEVENT")).toHaveLength(2);
   });
 });
+
+import {
+  applyEventChanges as apply2,
+  buildEvent as build2,
+} from "../src/ical.ts";
+
+describe("applyEventChanges recurrence", () => {
+  const base = build2(
+    {
+      uid: "u",
+      summary: "S",
+      start: "2026-11-13T15:00:00-03:00",
+      end: "2026-11-13T17:00:00-03:00",
+      allDay: false,
+    },
+    new Date("2026-11-10T00:00:00Z"),
+  );
+  test("adds and removes RRULE", () => {
+    const added = apply2(
+      base,
+      { recurrence: "FREQ=WEEKLY;BYDAY=FR" },
+      new Date(),
+    );
+    expect(added).toContain("RRULE:FREQ=WEEKLY;BYDAY=FR");
+    const removed = apply2(added, { recurrence: null }, new Date());
+    expect(removed).not.toContain("RRULE");
+  });
+});
