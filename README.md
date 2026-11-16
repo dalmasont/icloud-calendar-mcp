@@ -14,7 +14,7 @@ There is no shared public instance. You deploy your own copy to your Cloudflare 
 | `list_events`    | Lists events in a period, with recurring events expanded and times given with their UTC offset     |
 | `create_event`   | Creates a timed or all-day event                                                                   |
 | `update_event`   | Changes the title, time, location, or description, keeping alarms, attendees, and recurrence rules |
-| `delete_event`   | Deletes an event                                                                                   |
+| `delete_event`   | Deletes an event, or only one occurrence of a recurring event when `occurrence` is given           |
 
 ## Requirements
 
@@ -81,6 +81,6 @@ A `PROPFIND ... failed: 401` result means the iCloud credentials are wrong.
 ## Limitations
 
 - Reminders are not available over CalDAV and are not supported.
-- `update_event` and `delete_event` act on a recurring event as a whole series; single occurrences cannot be changed or removed on their own.
+- `update_event` acts on a recurring event as a whole series, and `delete_event` removes the whole series unless `occurrence` is given. With `occurrence` (the `start` that `list_events` shows, or a date), the series gets an `EXDATE` and its other occurrences stay. An occurrence that was changed on its own loses that change too. Changing single occurrences is not supported.
 - Recurring events that would take too many iterations to expand (for example, a rule repeating every second) are left out of `list_events` and reported in its `skipped` field.
 - Workers Free allows 10 ms of CPU per request. Expanding a daily event that has repeated for decades can exceed it; the request then fails.
