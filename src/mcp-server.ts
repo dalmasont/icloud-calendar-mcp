@@ -112,9 +112,15 @@ export function createMcpServer(tools: CalendarTools): McpServer {
     {
       title: "Delete event",
       description:
-        "Delete an event by the `url` returned by list_events. Deleting a recurring event removes the whole series.",
+        "Delete an event by the `url` returned by list_events. Deleting a recurring event removes the whole series, unless `occurrence` is given: then only that occurrence is removed (the series gets an EXDATE) and every other occurrence stays. Give `occurrence` as the `start` that list_events returned for it; for a timed event a date alone (YYYY-MM-DD) also works when only one occurrence starts that day in the event's own time zone. Fails if the event does not repeat or has no such occurrence. Removing an occurrence that is already removed succeeds and changes nothing.",
       inputSchema: z.object({
         eventUrl: z.url(),
+        occurrence: z
+          .union([z.iso.date(), z.iso.datetime({ offset: true, local: true })])
+          .optional()
+          .describe(
+            "The occurrence to remove: its `start` from list_events (e.g. 2026-11-17T08:00:00-03:00, or 2026-11-17 for an all-day event). Omit to delete the whole event",
+          ),
       }),
       annotations: {
         readOnlyHint: false,
@@ -123,10 +129,7 @@ export function createMcpServer(tools: CalendarTools): McpServer {
         openWorldHint: false,
       },
     },
-    async (input) => {
-      await tools.deleteEvent(input);
-      return json({ deleted: input.eventUrl });
-    },
+    async (input) => json(await tools.deleteEvent(input)),
   );
 
   return server;
