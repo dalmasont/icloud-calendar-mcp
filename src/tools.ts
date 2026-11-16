@@ -6,8 +6,10 @@ import {
 } from "./caldav-client.ts";
 import {
   applyEventChanges,
+  excludeOccurrence,
   type NewEvent,
   type Period,
+  parseOccurrence,
   RecurrenceBudget,
   type SkippedEvent,
 } from "./ical.ts";
@@ -42,7 +44,16 @@ export type CreateEventInput = {
 
 export type DeleteEventInput = {
   eventUrl: string;
+  /**
+   * Deletes only this occurrence of a recurring event, given as the `start`
+   * that list_events reports for it (or a date, for a day's single occurrence)
+   */
+  occurrence?: string;
 };
+
+export type DeleteEventResult =
+  | { deleted: string }
+  | { excluded: string; event: string; alreadyExcluded: boolean };
 
 /** Omitted fields stay as they are; `null` removes location or description */
 export type UpdateEventInput = {
@@ -203,8 +214,41 @@ export class CalendarTools {
       { ...text, ...period },
       this.dependencies.now(),
     );
+    await this.writeChecked(eventUrl, data, current.etag);
+    return { updated: eventUrl };
+  }
+
+  async deleteEvent(input: DeleteEventInput): Promise<DeleteEventResult> {
+    if (input.occurrence === undefined) {
+      await this.store.deleteEvent(await this.ownedEventUrl(input.eventUrl));
+      return { deleted: input.eventUrl };
+    }
+    parseOccurrence(input.occurrence);
+    const eventUrl = await this.ownedEventUrl(input.eventUrl);
+    const current = await this.store.getEvent(eventUrl);
+    const { ics, changed } = excludeOccurrence(
+      current.data,
+      input.occurrence,
+      this.dependencies.now(),
+    );
+    if (changed) {
+      await this.writeChecked(eventUrl, ics, current.etag);
+    }
+    return {
+      excluded: input.occurrence,
+      event: eventUrl,
+      alreadyExcluded: !changed,
+    };
+  }
+
+  /** Writes back with the ETag that was read, explaining a lost race */
+  private async writeChecked(
+    eventUrl: string,
+    data: string,
+    etag: string,
+  ): Promise<void> {
     try {
-      await this.store.updateEvent(eventUrl, data, current.etag);
+      await this.store.updateEvent(eventUrl, data, etag);
     } catch (error) {
       if (
         error instanceof CalDavError &&
@@ -216,11 +260,6 @@ export class CalendarTools {
       }
       throw error;
     }
-    return { updated: eventUrl };
-  }
-
-  async deleteEvent(input: DeleteEventInput): Promise<void> {
-    await this.store.deleteEvent(await this.ownedEventUrl(input.eventUrl));
   }
 
   /** Normalized URL of an event directly inside one of the owner's calendars */
