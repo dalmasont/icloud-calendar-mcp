@@ -276,16 +276,10 @@ function intlTimeZone(tzid: string): ICAL.Timezone {
 }
 
 /**
- * Parses calendar data into events overlapping `period`, expanding recurrence
- * rules so that servers which ignore CalDAV `expand` still yield occurrences
+ * Runs `run` with the calendar's time zones registered. The zone registry is
+ * global to the isolate, so it is reset afterwards to keep calendars apart.
  */
-export function parseEvents(
-  ics: string,
-  period: Period,
-  budget: RecurrenceBudget,
-): CalendarEvent[] {
-  const calendar = new ICAL.Component(ICAL.parse(ics));
-  // The zone registry is global to the isolate; scope it to this calendar
+function withTimeZones<T>(calendar: ICAL.Component, run: () => T): T {
   try {
     for (const zone of calendar.getAllSubcomponents("vtimezone")) {
       ICAL.TimezoneService.register(zone);
@@ -296,10 +290,23 @@ export function parseEvents(
         ICAL.TimezoneService.register(intlTimeZone(tzid));
       }
     }
-    return expandEvents(calendar, period, budget);
+    return run();
   } finally {
     ICAL.TimezoneService.reset();
   }
+}
+
+/**
+ * Parses calendar data into events overlapping `period`, expanding recurrence
+ * rules so that servers which ignore CalDAV `expand` still yield occurrences
+ */
+export function parseEvents(
+  ics: string,
+  period: Period,
+  budget: RecurrenceBudget,
+): CalendarEvent[] {
+  const calendar = new ICAL.Component(ICAL.parse(ics));
+  return withTimeZones(calendar, () => expandEvents(calendar, period, budget));
 }
 
 function expandEvents(
@@ -425,10 +432,193 @@ export function applyEventChanges(
     setBoundary(series, "dtend", changes.end, changes.allDay);
     series.removeAllProperties("duration");
   }
+  markModified(series, now);
+  return calendar.toString();
+}
+
+function markModified(series: ICAL.Component, now: Date): void {
   const sequence = Number(series.getFirstPropertyValue("sequence") ?? 0);
   series.updatePropertyWithValue("sequence", sequence + 1);
   series.updatePropertyWithValue("dtstamp", ICAL.Time.fromJSDate(now, true));
-  return calendar.toString();
+}
+
+/**
+ * Which occurrence to act on, in the form `list_events` reports its `start`:
+ * a date (an all-day occurrence, or any occurrence starting that day in the
+ * event's own zone), an instant (`Z` or an offset), or an offset-less
+ * date-time (floating events)
+ */
+export type OccurrenceTarget =
+  | { kind: "date"; date: string }
+  | { kind: "instant"; ms: number }
+  | { kind: "wall"; wall: string };
+
+const OCCURRENCE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const OCCURRENCE_WALL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/;
+const OCCURRENCE_INSTANT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+const ISO_DATE_LENGTH = 10;
+const WALL_WITHOUT_SECONDS_LENGTH = 16;
+/** Slack that covers every UTC offset and the date-only form */
+const SEARCH_SLACK_MS = 2 * MILLISECONDS_PER_DAY;
+
+export function parseOccurrence(value: string): OccurrenceTarget {
+  const invalid = () => new Error(`Invalid occurrence: ${value}`);
+  if (OCCURRENCE_DATE.test(value)) {
+    const roundTrip = new Date(`${value}T00:00:00Z`);
+    if (
+      Number.isNaN(roundTrip.getTime()) ||
+      roundTrip.toISOString().slice(0, ISO_DATE_LENGTH) !== value
+    ) {
+      throw invalid();
+    }
+    return { kind: "date", date: value };
+  }
+  if (OCCURRENCE_INSTANT.test(value)) {
+    const ms = Date.parse(value);
+    if (Number.isNaN(ms)) throw invalid();
+    return { kind: "instant", ms };
+  }
+  if (OCCURRENCE_WALL.test(value)) {
+    if (Number.isNaN(Date.parse(`${value}Z`))) throw invalid();
+    return {
+      kind: "wall",
+      wall:
+        value.length === WALL_WITHOUT_SECONDS_LENGTH ? `${value}:00` : value,
+    };
+  }
+  throw invalid();
+}
+
+function approximateMs(target: OccurrenceTarget): number {
+  switch (target.kind) {
+    case "date":
+      return Date.parse(`${target.date}T00:00:00Z`);
+    case "instant":
+      return target.ms;
+    case "wall":
+      return Date.parse(`${target.wall}Z`);
+  }
+}
+
+function matchesTarget(time: ICAL.Time, target: OccurrenceTarget): boolean {
+  switch (target.kind) {
+    case "date":
+      return time.toString().slice(0, ISO_DATE_LENGTH) === target.date;
+    case "instant":
+      return (
+        !time.isDate &&
+        !isFloating(time) &&
+        time.toJSDate().getTime() === target.ms
+      );
+    case "wall":
+      return (
+        !time.isDate && isFloating(time) && time.toString() === target.wall
+      );
+  }
+}
+
+function timeValues(component: ICAL.Component, name: string): ICAL.Time[] {
+  return component
+    .getAllProperties(name)
+    .flatMap((property) => property.getValues())
+    .filter((value): value is ICAL.Time => value instanceof ICAL.Time);
+}
+
+/** Generated slots of the series that match `target`, as the series' own times */
+function generatedSlots(series: ICAL.Component, target: OccurrenceTarget) {
+  const limit = approximateMs(target) + SEARCH_SLACK_MS;
+  const matches: ICAL.Time[] = [];
+  const iterator = new ICAL.Event(series).iterator();
+  let iterations = 0;
+  for (
+    let next = iterator.next();
+    next && next.toUnixTime() * MILLISECONDS_PER_SECOND <= limit;
+    next = iterator.next()
+  ) {
+    if (++iterations > MAX_ITERATIONS_PER_EVENT) {
+      throw new Error("The occurrence is too far from the series start");
+    }
+    if (matchesTarget(next, target)) matches.push(next.clone());
+  }
+  return matches;
+}
+
+function isZoned(time: ICAL.Time): boolean {
+  return (
+    !time.isDate && !isFloating(time) && time.zone !== ICAL.Timezone.utcTimezone
+  );
+}
+
+/**
+ * Removes one occurrence from a recurring event with an EXDATE (RFC 5545
+ * §3.8.5.1) and leaves the series and its other occurrences as they are. The
+ * EXDATE takes the form of the occurrence's own time (DATE, TZID or UTC), as
+ * the RFC requires it to match DTSTART. An occurrence that was changed on its
+ * own (RECURRENCE-ID) loses that override too. Excluding an occurrence that
+ * is already excluded changes nothing.
+ */
+export function excludeOccurrence(
+  ics: string,
+  occurrence: string,
+  now: Date,
+): { ics: string; changed: boolean } {
+  const target = parseOccurrence(occurrence);
+  const calendar = new ICAL.Component(ICAL.parse(ics));
+  const components = calendar.getAllSubcomponents("vevent");
+  const series = components.find((c) => !c.hasProperty("recurrence-id"));
+  if (!series) {
+    throw new Error("The event has no series to update");
+  }
+  return withTimeZones(calendar, () => {
+    if (!new ICAL.Event(series).isRecurring()) {
+      throw new Error(
+        "The event is not recurring; delete it without an occurrence instead",
+      );
+    }
+    const overrides = components
+      .filter((c) => c.hasProperty("recurrence-id"))
+      .map((component) => ({
+        component,
+        id: component.getFirstPropertyValue("recurrence-id") as ICAL.Time,
+        shown: component.getFirstPropertyValue("dtstart") as ICAL.Time,
+      }));
+    // An overridden slot shows up where its override put it, not where the rule did
+    const slots = [
+      ...overrides
+        .filter((o) => matchesTarget(o.shown, target))
+        .map((o) => o.id),
+      ...generatedSlots(series, target).filter(
+        (slot) => !overrides.some((o) => o.id.compare(slot) === 0),
+      ),
+    ].filter(
+      (slot, i, all) => all.findIndex((s) => s.compare(slot) === 0) === i,
+    );
+    if (slots.length > 1) {
+      throw new Error(
+        `The date matches several occurrences; give the full start of one: ${occurrence}`,
+      );
+    }
+    const [slot] = slots;
+    if (!slot) {
+      if (timeValues(series, "exdate").some((t) => matchesTarget(t, target))) {
+        return { ics, changed: false };
+      }
+      throw new Error(`Unknown occurrence: ${occurrence}`);
+    }
+    for (const override of overrides) {
+      if (override.id.compare(slot) === 0) {
+        calendar.removeSubcomponent(override.component);
+      }
+    }
+    // ical.js leaves out the TZID, which would turn a zoned EXDATE floating
+    const exdate = new ICAL.Property("exdate", series);
+    exdate.setValue(slot);
+    if (isZoned(slot)) exdate.setParameter("tzid", slot.zone.tzid);
+    series.addProperty(exdate);
+    markModified(series, now);
+    return { ics: calendar.toString(), changed: true };
+  });
 }
 
 const PRODID = "-//icloud-calendar-mcp//EN";
