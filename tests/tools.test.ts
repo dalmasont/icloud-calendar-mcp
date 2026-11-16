@@ -323,3 +323,131 @@ describe("CalendarTools.deleteEvent", () => {
     expect(calls).toEqual([]);
   });
 });
+
+const RECURRING_ICS = [
+  "BEGIN:VCALENDAR",
+  "VERSION:2.0",
+  "BEGIN:VEVENT",
+  "UID:agenda",
+  "DTSTAMP:20261001T000000Z",
+  "DTSTART;TZID=America/Sao_Paulo:20261116T080000",
+  "DTEND;TZID=America/Sao_Paulo:20261116T230000",
+  "RRULE:FREQ=DAILY",
+  "SUMMARY:Agenda Aberta",
+  "END:VEVENT",
+  "END:VCALENDAR",
+].join("\r\n");
+
+describe("CalendarTools.deleteEvent with an occurrence", () => {
+  const eventUrl = `${WORK.url}agenda.ics`;
+
+  function recurringStore() {
+    const fake = fakeStore();
+    fake.store.getEvent = async (url) => {
+      fake.calls.push(`getEvent ${url}`);
+      return { data: RECURRING_ICS, etag: '"e1"' };
+    };
+    return fake;
+  }
+
+  test("adds an EXDATE with the ETag it read and never deletes the series", async () => {
+    const { tools, calls, updated } = recurringStore();
+
+    const result = await tools.deleteEvent({
+      eventUrl,
+      occurrence: "2026-11-17",
+    });
+
+    expect(result).toEqual({
+      excluded: "2026-11-17",
+      event: eventUrl,
+      alreadyExcluded: false,
+    });
+    expect(calls).toEqual([
+      `getEvent ${eventUrl}`,
+      `updateEvent ${eventUrl} "e1"`,
+    ]);
+    expect(updated[0]?.split("\r\n")).toContain(
+      "EXDATE;TZID=America/Sao_Paulo:20261117T080000",
+    );
+    expect(updated[0]).toContain("RRULE:FREQ=DAILY");
+  });
+
+  test("writes nothing when the occurrence is already excluded", async () => {
+    const { tools, calls, store } = recurringStore();
+    const withExdate = RECURRING_ICS.replace(
+      "RRULE:FREQ=DAILY",
+      "RRULE:FREQ=DAILY\r\nEXDATE;TZID=America/Sao_Paulo:20261117T080000",
+    );
+    store.getEvent = async (url) => {
+      calls.push(`getEvent ${url}`);
+      return { data: withExdate, etag: '"e1"' };
+    };
+
+    const result = await tools.deleteEvent({
+      eventUrl,
+      occurrence: "2026-11-17",
+    });
+
+    expect(result).toEqual({
+      excluded: "2026-11-17",
+      event: eventUrl,
+      alreadyExcluded: true,
+    });
+    expect(calls).toEqual([`getEvent ${eventUrl}`]);
+  });
+
+  test("explains a conflict when the event changed since it was read", async () => {
+    const { tools, store } = recurringStore();
+    store.updateEvent = async (url) => {
+      throw new CalDavError("PUT", url, 412);
+    };
+
+    await expect(
+      tools.deleteEvent({ eventUrl, occurrence: "2026-11-17" }),
+    ).rejects.toThrow(
+      `The event changed since it was read; read it again and retry: ${eventUrl}`,
+    );
+  });
+
+  test("refuses an event that does not repeat and leaves it alone", async () => {
+    const { tools, calls } = fakeStore();
+    const single = `${WORK.url}a.ics`;
+
+    await expect(
+      tools.deleteEvent({
+        eventUrl: single,
+        occurrence: "2026-10-06T01:00:00Z",
+      }),
+    ).rejects.toThrow("not recurring");
+    expect(calls).toEqual([`getEvent ${single}`]);
+  });
+
+  test("rejects an invalid occurrence before any request", async () => {
+    const { tools, calls } = recurringStore();
+
+    await expect(
+      tools.deleteEvent({ eventUrl, occurrence: "tomorrow" }),
+    ).rejects.toThrow("Invalid occurrence");
+    expect(calls).toEqual([]);
+  });
+
+  test("rejects URLs outside the owner's calendars without any request", async () => {
+    const { tools, calls } = recurringStore();
+    const foreign = "https://attacker.example/123/calendars/work/agenda.ics";
+
+    await expect(
+      tools.deleteEvent({ eventUrl: foreign, occurrence: "2026-11-17" }),
+    ).rejects.toThrow(`Unknown event: ${foreign}`);
+    expect(calls).toEqual([]);
+  });
+
+  test("without an occurrence the whole event is still deleted", async () => {
+    const { tools, calls } = recurringStore();
+
+    const result = await tools.deleteEvent({ eventUrl });
+
+    expect(result).toEqual({ deleted: eventUrl });
+    expect(calls).toEqual([`deleteEvent ${eventUrl}`]);
+  });
+});
